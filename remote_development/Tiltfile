@@ -1,0 +1,92 @@
+def join(arr, delimeter):
+  str=""
+  for element in arr:
+    str=("%s%s%s" % (str, delimeter, element))
+  
+  return str
+
+def get_container(decoded_yaml, container_selector):
+  containers=decoded_yaml["spec"]["template"]["spec"]["containers"]
+  found_containers=[]
+
+  for container in containers:
+    if container["name"] == container_selector:
+      return container
+    
+    fail("failed to find container %s in the manifest %s" % (container_selector, containers))
+  
+
+def get_image(container):
+  return container["image"].rsplit(":", 1)[0]
+
+def remove_probes(container):
+  if not container.get("startupProbe") and container.get("livenessProbe"):
+    container.setdefault("startupProbe", decode_yaml(encode_yaml(container.get("livenessProbe"))))
+  
+  remove_probe(container, "livenessProbe")
+  remove_probe(container, "readinessProbe")
+
+def remove_probe(container, probe):
+  if container.get(probe):
+    container.pop(probe)  
+
+def expose_ports(container, port_forwards):
+  for port in port_forwards:
+    if type(port) == "string":
+      port=port.rsplit(":", 1)[1]
+    
+    shouldAdd=True
+    for containerPort in container["ports"]:
+      if containerPort["containerPort"] == port:
+        shouldAdd=False
+    if shouldAdd:
+      container["ports"].append({"containerPort": int(port)})
+
+def remote_development(obj, container_selector, namespace = None, port_forwards = None, disable_probes = False, live_update = None, dockerfile = None):
+  """
+  Enable remote developement and debugging environment on an exiting deployment.
+  It will redeploy the app using the given development Dockerfile, enable port-forwarding and disable healthcheck in order to enable remote debugging.
+  Both docker image build and port-forwarding can be replaced by your own docker_build and k8s_resource
+  Args:
+    obj: An object name in the form "kind/name", as you would express it to kubectl. e.g., deployment/my-deployment.
+    container_selector: When using live-update, the container selector finds the container to update by comparing container name.
+    namespace?: The namespace of the object. If not specified, uses the default namespace
+    dockerfile?: Will be used for building a developemnt image suitable for live-update. Make sure to use a non-restricted user such as `nobody` and to setup hot-reload, so the app would be able restart whenver the source file are changed.
+    live_update?: Live-update rules to copy files and run commands in the server whenever they change locally. Default: None
+    port_forwards?: Used to enable port-forwarding to the app running in the pod. Default: None
+    disable_probes?: Disable liveness and readiness probes by removing them from the deployment, which is usefull when debugging node applications. Default: false
+  """
+  args = ["kubectl", "get", "-o=yaml", obj]
+  if namespace:
+    args.extend(["-n", namespace])
+
+  yaml=local(args, quiet=True)
+  decoded_yaml=decode_yaml(yaml)
+  container=get_container(decoded_yaml, container_selector)
+  image=get_image(container)
+
+  # build
+  if dockerfile:
+    docker_build(image, ".",
+      dockerfile=dockerfile,
+      live_update=live_update
+    )
+
+  # disable probes
+  if disable_probes:
+    remove_probes(container)
+    
+  # enable port forwarding to the pod
+  if len(port_forwards) > 0:
+    expose_ports(container, port_forwards)
+    
+    # deploy the updated deployment
+    k8s_yaml(encode_yaml(decoded_yaml))
+    k8s_resource(
+      obj.split("/")[1],
+      new_name=container_selector,
+      port_forwards=port_forwards
+    )
+  else:
+    # deploy the updated deployment
+    k8s_yaml(encode_yaml(decoded_yaml))

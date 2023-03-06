@@ -1,0 +1,14 @@
+FROM node:18-alpine
+WORKDIR /app
+
+COPY ./ ./
+RUN npm ci
+
+CMD [ \
+  "npx", "nodemon", \
+  "--watch /app", \
+  "--ext", "js" , \
+  "--signal", "SIGHUP", \
+  "--inspect", \
+  "index.js" \
+]
